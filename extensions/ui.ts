@@ -19,11 +19,16 @@ const getDecisionFlags = (decision: RoutingDecision): string[] => {
   if (decision.isFallback) flags.push('fallback');
   if (decision.isBudgetForced) flags.push('budget-limit');
   if (decision.isRuleMatched) flags.push('rule');
+  if (decision.isClassifier) flags.push('Jev classifier');
+  else if (decision.reasoning.includes('Classifier fallback:'))
+    flags.push('classifier fallback');
   return flags;
 };
 
 export const formatDecision = (decision: RoutingDecision): string => {
-  return `${decision.profile}: ${decision.tier} -> ${decision.targetProvider}/${decision.targetModelId} [${decision.thinking}] (${decision.reasoning})`;
+  const flags = getDecisionFlags(decision);
+  const marker = flags.length ? ` {${flags.join(', ')}}` : '';
+  return `${decision.profile}: ${decision.tier} -> ${decision.targetProvider}/${decision.targetModelId} [${decision.thinking}]${marker} (${decision.reasoning})`;
 };
 
 export const formatPinSummary = (
@@ -86,6 +91,11 @@ export const updateStatus = (
     ? pinnedTierByProfile[selectedProfile]
     : undefined;
   const pinLabel = activePin ? ` [pin:${activePin}]` : '';
+  const classifierLabel = lastDecision?.isClassifier
+    ? ' [Jev]'
+    : lastDecision?.reasoning.includes('Classifier fallback:')
+      ? ' [classifier fallback]'
+      : '';
 
   if (activeRouterProfile) {
     const matchesProfile =
@@ -99,7 +109,7 @@ export const updateStatus = (
         activeRouterProfile,
         lastDecision,
       );
-      statusText = `router:${activeRouterProfile}${pinLabel} -> ${lastDecision.tier} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`;
+      statusText = `router:${activeRouterProfile}${pinLabel} -> ${lastDecision.tier}${classifierLabel} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`;
     } else {
       statusText = `router:${activeRouterProfile}${pinLabel} -> waiting`;
     }

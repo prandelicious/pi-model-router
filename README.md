@@ -77,6 +77,28 @@ Copy the example config to one of:
 | `models`                   | (Optional) Map of model aliases to definitions with `model`, `contextWindow`, `maxTokens`.                                                                                                                                                                               |
 | `profiles`                 | Map of profile definitions, each containing optional `high`, `medium`, and `low` tiers (at least one required). Tier models can reference aliases from `models`.                                                                                                         |
 
+### Low-tier escalation
+
+To enable escalation for selected profiles, add this configuration:
+
+```json
+{
+  "lowEscalation": {
+    "enabledProfiles": ["auto"],
+    "maxToolRounds": 6,
+    "maxConsecutiveFailedRounds": 2
+  }
+}
+```
+
+The router moves from low to medium after six completed tool rounds or two consecutive failed rounds. A round fails when every tool call returns an error. Parallel calls count as one round. The router retains medium until the next user request. Pins, matching rules, and budget restrictions take precedence. Escalation uses no additional classifier call.
+
+### Subscription fallback
+
+The router recognizes subscription limits from `openai-codex` and `opencode-go`. When a configured fallback remains, it uses Pi's retry budget to attempt the next target. A Codex account limit creates a shared cooldown. Run `/router-quota status` to inspect it or `/router-quota reset` after an account change. Authentication errors and ordinary transient errors do not create a cooldown. A new user request tries the primary model again after the cooldown expires.
+
+Use `thinkingByModel` within a tier to set fallback-specific thinking levels. A session thinking override takes precedence.
+
 ### Local & Custom Models (`llama.cpp`, Ollama, LM Studio)
 
 #### 1. Using Pi's built-in `/llama` integration

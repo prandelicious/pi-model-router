@@ -1,4 +1,7 @@
-import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
+import type {
+  ThinkingLevel,
+  AgentMessage,
+} from '@earendil-works/pi-agent-core';
 import type {
   Api,
   ClassifierApi,
@@ -168,6 +171,13 @@ export interface RouterExtensionAPI<
     handler: (event: unknown, ctx: TCtx) => Promise<void> | void,
   ): void;
   on(
+    event: 'message_end',
+    handler: (
+      event: { message: AgentMessage },
+      ctx: TCtx,
+    ) => { message: AgentMessage } | void,
+  ): void;
+  on(
     event: 'model_select',
     handler: (event: RouterModelSelectEvent, ctx: TCtx) => Promise<void> | void,
   ): void;
@@ -203,6 +213,7 @@ export interface RoutedTierConfig {
   model: string;
   thinking?: ThinkingLevel;
   fallbacks?: string[];
+  thinkingByModel?: Record<string, ThinkingLevel>;
   contextWindow?: number;
   maxTokens?: number;
   reasoning?: boolean;
@@ -218,8 +229,15 @@ export interface RouterProfile {
   low?: RoutedTierConfig;
 }
 
+export interface LowEscalationConfig {
+  enabledProfiles: string[];
+  maxToolRounds: number;
+  maxConsecutiveFailedRounds: number;
+}
+
 export interface RouterConfig {
   debug?: boolean;
+  lowEscalation?: LowEscalationConfig;
   autoPinFirstTurnDecision?: boolean;
   classifierModel?: ClassifierConfig;
   phaseBias?: number;

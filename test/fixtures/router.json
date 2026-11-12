@@ -1,0 +1,59 @@
+{
+  "classifierModel": "typesafe/jev-latest",
+  "phaseBias": 0.5,
+  "autoPinFirstTurnDecision": false,
+  "models": {
+    "sol": { "model": "openai-codex/gpt-6.1-sol" },
+    "terra": { "model": "openai-codex/gpt-6.1-terra" },
+    "luna": { "model": "openai-codex/gpt-6-luna" },
+    "gemini-go": { "model": "opencode-go/gemini-4-argon" },
+    "ds-go": { "model": "opencode-go/deepseek-v4.1-flash" },
+    "haiku-go": { "model": "opencode-go/claude-haiku-5-5" },
+    "sonnet-or": { "model": "openrouter/anthropic/claude-sonnet-5.5" },
+    "ds-or": { "model": "openrouter/deepseek/deepseek-v4.1-flash" },
+    "opus-or": { "model": "openrouter/anthropic/claude-opus-5.5" },
+    "luna-or": { "model": "openrouter/openai/gpt-6-luna" },
+    "beam-free": { "model": "opencode-go/beam-free" }
+  },
+  "rules": [],
+  "profiles": {
+    "auto": {
+      "high": {
+        "model": "sol",
+        "thinking": "high",
+        "fallbacks": ["gemini-go", "sonnet-or"]
+      },
+      "medium": {
+        "model": "terra",
+        "thinking": "medium",
+        "fallbacks": ["ds-go", "ds-or", "sonnet-or"],
+        "thinkingByModel": { "ds-go": "high", "ds-or": "high" }
+      },
+      "low": {
+        "model": "luna",
+        "thinking": "low",
+        "fallbacks": ["haiku-go", "luna-or"]
+      }
+    },
+    "cheap": {
+      "low": { "model": "luna", "thinking": "low", "fallbacks": ["haiku-go"] }
+    },
+    "deep": {
+      "high": {
+        "model": "sol",
+        "thinking": "max",
+        "fallbacks": ["opus-or", "sonnet-or"]
+      }
+    },
+    "long": {
+      "high": {
+        "model": "gemini-go",
+        "thinking": "high",
+        "fallbacks": ["sonnet-or"]
+      }
+    },
+    "free": {
+      "medium": { "model": "beam-free", "thinking": "medium" }
+    }
+  }
+}

@@ -19,6 +19,21 @@
       "default": false,
       "description": "Automatically pin the active router profile to the tier selected on the first turn of a conversation. Use '/router pin auto' to unpin and return to dynamic per-turn routing."
     },
+    "lowEscalation": {
+      "type": "object",
+      "description": "Escalate eligible auto-profile requests from low after the configured tool-round thresholds.",
+      "required": [
+        "enabledProfiles",
+        "maxToolRounds",
+        "maxConsecutiveFailedRounds"
+      ],
+      "properties": {
+        "enabledProfiles": { "type": "array", "items": { "type": "string" } },
+        "maxToolRounds": { "type": "integer", "minimum": 1 },
+        "maxConsecutiveFailedRounds": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
     "classifierModel": {
       "description": "Classifier model used to categorize user intent. Accepts \"auto\" (uses first available Pi native classifier such as Jev, Clef, GPT-6 Luna, or llama.cpp classifier), a model alias from \"models\", a canonical \"provider/model\" reference, or an object with \"model\" and optional \"thinking\".",
       "oneOf": [
@@ -134,6 +149,11 @@
           "$ref": "#/$defs/thinkingLevel",
           "default": "medium",
           "description": "Default thinking level for this tier."
+        },
+        "thinkingByModel": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/thinkingLevel" },
+          "description": "Per-target thinking levels, keyed by a tier model alias or canonical provider/model ID. Explicit session thinking overrides take precedence."
         },
         "fallbacks": {
           "type": "array",

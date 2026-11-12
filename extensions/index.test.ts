@@ -130,7 +130,7 @@ describe('index.ts (orchestrator)', () => {
 
   beforeEach(() => {
     eventListeners = {};
-    mockPi = createMockPi(eventListeners);
+    mockPi = createMockPi(eventListeners) as unknown as typeof mockPi;
   });
 
   it('should initialize and register commands, virtual models, and event hooks', () => {

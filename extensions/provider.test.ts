@@ -651,7 +651,7 @@ describe('provider.ts (virtual models)', () => {
       expect(retry1.model.provider).toBe('google');
       expect(retry1.model.id).toBe('gemini-1.5-flash');
 
-      // Turn 2 user request on same tier (medium, unpinned) -> sticks to working fallback (gemini-1.5-flash)
+      // A new user request retries the primary model.
       const turn2Route = await vm.route(
         buildRequest({
           reason: 'user',
@@ -668,28 +668,24 @@ describe('provider.ts (virtual models)', () => {
         }),
         mockState.lastExtensionContext!,
       );
-      expect(turn2Route.model.provider).toBe('google');
-      expect(turn2Route.model.id).toBe('gemini-1.5-flash');
-      expect(mockState.lastDecision?.isFallback).toBe(true);
-      expect(mockState.lastDecision?.reasoning).toContain(
-        'Preserved fallback google/gemini-1.5-flash for medium tier.',
-      );
+      expect(turn2Route.model.provider).toBe('openai');
+      expect(turn2Route.model.id).toBe('gpt-4o-mini');
 
-      // If gemini-1.5-flash now fails on Turn 2 -> advances to 2nd fallback (gpt-4o-fallback-2), NOT back to broken primary
+      // If the primary fails again, retry the first fallback.
       const retry2 = await vm.route(
         buildRequest({
           reason: 'retry',
           state: turn2Route.state,
           failed: {
             model: createTestModel({
-              provider: 'google',
-              id: 'gemini-1.5-flash',
+              provider: 'openai',
+              id: 'gpt-4o-mini',
             }),
             thinkingLevel: 'medium',
             message: {
               ...createAssistantMsg('', 0),
-              provider: 'google',
-              model: 'gemini-1.5-flash',
+              provider: 'openai',
+              model: 'gpt-4o-mini',
               stopReason: 'error',
               errorMessage: '503 Service Unavailable',
             },
@@ -697,8 +693,8 @@ describe('provider.ts (virtual models)', () => {
         }),
         mockState.lastExtensionContext!,
       );
-      expect(retry2.model.provider).toBe('openai');
-      expect(retry2.model.id).toBe('gpt-4o-fallback-2');
+      expect(retry2.model.provider).toBe('google');
+      expect(retry2.model.id).toBe('gemini-1.5-flash');
     });
 
     it('should auto-pin on first turn when autoPinFirstTurnDecision is enabled and allow unpinning back to dynamic routing', async () => {

@@ -132,6 +132,7 @@ export const mergeConfig = (
     debug: override.debug ?? base.debug,
     autoPinFirstTurnDecision:
       override.autoPinFirstTurnDecision ?? base.autoPinFirstTurnDecision,
+    lowEscalation: override.lowEscalation ?? base.lowEscalation,
     classifierModel: override.classifierModel ?? base.classifierModel,
     phaseBias: override.phaseBias ?? base.phaseBias,
     maxSessionBudget: override.maxSessionBudget ?? base.maxSessionBudget,
@@ -287,6 +288,24 @@ export const normalizeTierConfig = (
     }
   }
 
+  const thinkingByModel: Record<string, ThinkingLevel> = {};
+  if (isObjectRecord(value.thinkingByModel)) {
+    for (const [ref, level] of Object.entries(value.thinkingByModel)) {
+      const resolved = resolveModelRef(ref, models).canonicalRef;
+      try {
+        parseCanonicalModelRef(resolved);
+        if (!isThinkingLevel(level)) throw new Error('Invalid thinking level');
+        if (![parsedModel, ...(fallbacks ?? [])].includes(resolved))
+          throw new Error('Model is not in this tier');
+        thinkingByModel[resolved] = level;
+      } catch (error) {
+        warnings.push(
+          `Profile "${profileName}" ${tier} thinkingByModel "${ref}": ${String(error)}`,
+        );
+      }
+    }
+  }
+
   // Resolve contextWindow: tier config > alias > hardcoded default
   const tierContextWindow = parsePositiveNumber(value.contextWindow);
   const resolvedContextWindow =
@@ -328,6 +347,7 @@ export const normalizeTierConfig = (
     model: parsedModel,
     thinking,
     fallbacks,
+    thinkingByModel,
     contextWindow: tierContextWindow,
     maxTokens: tierMaxTokens,
     reasoning: tierReasoning,
@@ -464,9 +484,34 @@ export const normalizeConfig = (
     }
   }
 
+  const escalationRaw = isObjectRecord(raw.lowEscalation)
+    ? raw.lowEscalation
+    : undefined;
+  const lowEscalation =
+    escalationRaw && Array.isArray(escalationRaw.enabledProfiles)
+      ? {
+          enabledProfiles: escalationRaw.enabledProfiles.filter(
+            (name): name is string => typeof name === 'string',
+          ),
+          maxToolRounds:
+            typeof escalationRaw.maxToolRounds === 'number' &&
+            Number.isInteger(escalationRaw.maxToolRounds) &&
+            escalationRaw.maxToolRounds > 0
+              ? escalationRaw.maxToolRounds
+              : 6,
+          maxConsecutiveFailedRounds:
+            typeof escalationRaw.maxConsecutiveFailedRounds === 'number' &&
+            Number.isInteger(escalationRaw.maxConsecutiveFailedRounds) &&
+            escalationRaw.maxConsecutiveFailedRounds > 0
+              ? escalationRaw.maxConsecutiveFailedRounds
+              : 2,
+        }
+      : undefined;
+
   return {
     config: {
       debug: typeof raw.debug === 'boolean' ? raw.debug : false,
+      lowEscalation,
       autoPinFirstTurnDecision:
         typeof raw.autoPinFirstTurnDecision === 'boolean'
           ? raw.autoPinFirstTurnDecision

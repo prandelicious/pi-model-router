@@ -37,8 +37,56 @@ import {
   hasImageAttachment,
 } from './routing';
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
+import { codexQuotaGuard, type CodexQuotaGuard } from './codex-quota';
 
 const countedMessages = new WeakSet<object>();
+
+const toolRoundStats = (messages: readonly unknown[]) => {
+  const lastUserIndex = messages.findLastIndex(
+    (message) => isObjectRecord(message) && message.role === 'user',
+  );
+  const rounds: { callIds: Set<string>; results: Map<string, boolean> }[] = [];
+  for (const message of messages.slice(lastUserIndex + 1)) {
+    if (!isObjectRecord(message)) continue;
+    if (message.role === 'assistant') {
+      // Only completed assistant tool-use responses represent an executed round.
+      if (message.stopReason !== 'toolUse' || !Array.isArray(message.content))
+        continue;
+      const callIds = new Set(
+        message.content.flatMap((part) =>
+          isObjectRecord(part) &&
+          part.type === 'toolCall' &&
+          typeof part.id === 'string'
+            ? [part.id]
+            : [],
+        ),
+      );
+      if (callIds.size) rounds.push({ callIds, results: new Map() });
+    } else if (
+      message.role === 'toolResult' &&
+      typeof message.toolCallId === 'string' &&
+      rounds.length
+    ) {
+      const round = rounds.findLast((candidate) =>
+        candidate.callIds.has(message.toolCallId as string),
+      );
+      if (round)
+        round.results.set(message.toolCallId, message.isError === true);
+    }
+  }
+  const complete = rounds.filter((round) =>
+    [...round.callIds].every((callId) => round.results.has(callId)),
+  );
+  let consecutiveFailedRounds = 0;
+  for (const round of [...complete].reverse()) {
+    if (
+      ![...round.callIds].every((callId) => round.results.get(callId) === true)
+    )
+      break;
+    consecutiveFailedRounds++;
+  }
+  return { rounds: complete.length, consecutiveFailedRounds };
+};
 
 export const markMessageCostCounted = (message: unknown): void => {
   if (isObjectRecord(message)) {
@@ -145,6 +193,7 @@ export interface RouterProviderState<TContext = ExtensionContext> {
   readonly thinkingByProfile: RouterThinkingByProfile;
   readonly pinnedTierByProfile: RouterPinByProfile;
   accumulatedCost: number;
+  codexQuotaGuard?: CodexQuotaGuard;
 }
 
 export interface RouterProviderActions<TContext = ExtensionContext> {
@@ -183,6 +232,13 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       throw new Error(`Unknown router profile: ${profileName}`);
     }
 
+    const quota = state.codexQuotaGuard ?? codexQuotaGuard;
+    quota.observe(
+      request.failed?.model.provider,
+      request.failed?.message.errorMessage,
+    );
+    const quotaUntil = quota.deadline();
+
     const resolveCandidate = (
       modelRef: string,
     ):
@@ -201,6 +257,12 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         return {
           ok: false,
           error: `Invalid routed target "${modelRef}": cannot route to virtual router provider.`,
+        };
+      }
+      if (provider === 'openai-codex' && quotaUntil !== undefined) {
+        return {
+          ok: false,
+          error: `Codex usage limit: suspended until ${new Date(quotaUntil).toISOString()}`,
         };
       }
       const targetModel = registry.find(provider, modelId);
@@ -256,7 +318,11 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       delegatedThinking: ThinkingLevel;
     } => {
       const effectiveThinking =
-        actions.getThinkingOverride(profileName, tier) ?? baseThinking;
+        actions.getThinkingOverride(profileName, tier) ??
+        profile[tier]?.thinkingByModel?.[
+          `${targetModel.provider}/${targetModel.id}`
+        ] ??
+        baseThinking;
       const clamped = clampThinkingLevel(
         effectiveThinking,
         resolveThinkingLevels(tier, profile, registry, targetModel),
@@ -289,13 +355,23 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         pinnedTier ?? previousDecision?.tier ?? 'medium',
       );
       const tierConfig = profile[directTier]!;
-      const candidates = getTierModels(
+      let candidates = getTierModels(
         profile,
         directTier,
         previousDecision?.tier === directTier
           ? previousDecision.targetLabel
           : undefined,
       );
+      if (hasImageAttachment({ messages: [...request.messages] })) {
+        candidates = candidates.filter((ref) =>
+          findModelByRef(ref, registry)?.input?.includes('image'),
+        );
+        if (candidates.length === 0) {
+          throw new Error(
+            `No image-capable model is configured for the ${directTier} tier in profile "${profileName}".`,
+          );
+        }
+      }
       const resolved = resolveFirstAvailableModel(candidates);
       const { delegatedThinking } = resolveDelegatedThinking(
         directTier,
@@ -335,9 +411,40 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       pinnedTier !== undefined &&
       pinnedTier !== previousDecision?.tier;
 
+    const escalation = state.currentConfig.lowEscalation;
+    const toolStats = toolRoundStats(request.messages);
+    const escalationEligible =
+      isContinuation &&
+      request.reason !== 'retry' &&
+      escalation?.enabledProfiles.includes(profileName) === true &&
+      pinnedTier === undefined &&
+      !isBudgetExceeded &&
+      previousDecision?.tier === 'low' &&
+      !previousDecision.isRuleMatched;
+    const escalationReason =
+      escalationEligible &&
+      (toolStats.rounds >= escalation!.maxToolRounds ||
+        toolStats.consecutiveFailedRounds >=
+          escalation!.maxConsecutiveFailedRounds)
+        ? toolStats.rounds >= escalation!.maxToolRounds
+          ? `Low-tier escalation after ${toolStats.rounds} assistant tool rounds.`
+          : `Low-tier escalation after ${toolStats.consecutiveFailedRounds} consecutive tool rounds failed.`
+        : undefined;
+
     let decision: RoutingDecision;
 
-    if (
+    if (escalationReason) {
+      const escalatedTier = resolveAvailableTier(profile, 'medium');
+      decision = buildRoutingDecision(
+        profileName,
+        profile,
+        escalatedTier,
+        phaseForTier(escalatedTier),
+        escalationReason,
+        state.thinkingByProfile[profileName],
+        false,
+      );
+    } else if (
       (isContinuation || request.reason === 'retry') &&
       previousDecision &&
       !hasChangedPinOnContinuation
@@ -380,13 +487,18 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       );
 
       // Classifier Override — skip when pinned, rule-matched, or budget exceeded.
+      const configuredTierCount = ROUTER_TIERS.filter(
+        (tier) => profile[tier] !== undefined,
+      ).length;
       if (
         !isContinuation &&
+        configuredTierCount > 1 &&
         state.currentConfig.classifierModel &&
         !pinnedTier &&
         !decision.isRuleMatched &&
         !isBudgetExceeded
       ) {
+        let classifierFailure = 'Classifier returned no usable decision';
         const classifierResult = await runClassifier(
           state.currentConfig.classifierModel.model,
           registry,
@@ -395,6 +507,9 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
           state.currentConfig.classifierModel.thinking,
           state.currentConfig.phaseBias,
           request.signal,
+          (reason) => {
+            classifierFailure = reason;
+          },
         );
         if (classifierResult?.cost) {
           state.accumulatedCost += classifierResult.cost;
@@ -413,6 +528,39 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
             state.thinkingByProfile[profileName],
             true,
           );
+        } else {
+          decision.reasoning = `Classifier fallback: ${classifierFailure}. Heuristic: ${decision.reasoning}`;
+          const uiContext = ctx ?? state.lastExtensionContext;
+          if (uiContext && typeof uiContext === 'object' && 'ui' in uiContext) {
+            const ui = (
+              uiContext as {
+                ui?: { notify?: (message: string, type: 'warning') => void };
+              }
+            ).ui;
+            try {
+              ui?.notify?.(
+                `Router: ${classifierFailure}. Used ${decision.tier} heuristic fallback.`,
+                'warning',
+              );
+            } catch {
+              // A stale UI must not prevent routing.
+            }
+          }
+        }
+      }
+    }
+
+    if (escalationReason) {
+      const uiContext = ctx ?? state.lastExtensionContext;
+      if (uiContext && typeof uiContext === 'object' && 'ui' in uiContext) {
+        try {
+          (
+            uiContext as {
+              ui?: { notify?: (message: string, type: 'info') => void };
+            }
+          ).ui?.notify?.(escalationReason, 'info');
+        } catch {
+          // A stale UI must not prevent routing.
         }
       }
     }
@@ -422,6 +570,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       findModelByRef(modelRef, registry)?.input?.includes('image') ?? false;
 
     const preferredForImageCheck =
+      (isContinuation || request.reason === 'retry') &&
       previousDecision?.tier === decision.tier
         ? previousDecision.targetLabel
         : decision.targetLabel;
@@ -466,6 +615,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
     }
 
     const preferredModel =
+      (isContinuation || request.reason === 'retry') &&
       previousDecision?.tier === decision.tier
         ? previousDecision.targetLabel
         : decision.targetLabel;
@@ -474,7 +624,9 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
     if (imageAttached) {
       modelsToTry = modelsToTry.filter(checkModelSupportsImage);
       if (modelsToTry.length === 0) {
-        modelsToTry = [preferredModel];
+        throw new Error(
+          `No image-capable model is available for the ${decision.tier} tier in profile "${profileName}".`,
+        );
       }
     }
 

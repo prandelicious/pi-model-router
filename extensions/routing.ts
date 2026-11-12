@@ -25,10 +25,10 @@ import {
 } from './config';
 
 const TIER_CRITERIA: Record<RouterTier, string> = {
-  high: 'Architecture, design, planning, tradeoff analysis, broad debugging, large refactors, or codebase research',
+  high: 'Architecture, design, tradeoff analysis, broad debugging, large refactors, or complex research with uncertain scope',
   medium:
-    'Implementation of a known plan, multi-file edits, normal coding work, focused debugging, or tests/fixes',
-  low: 'Summaries, changelogs, formatting, quick explanations, small bounded transforms, or simple read-only lookups',
+    'Normal coding work, multi-file edits, focused debugging, tests, or file operations that require substantial investigation or coordination',
+  low: 'Simple bounded tasks with clear scope, including file or session cleanup, basic file operations, summaries, formatting, and read-only lookups. Judge difficulty separately from destructive risk: even simple deletions require safeguards and respect for exclusions',
 };
 
 export const extractTextFromContent = (
@@ -94,7 +94,13 @@ export const extractLastUserImages = (context: Context): ImageContent[] => {
 };
 
 export const containsAny = (text: string, keywords: string[]): boolean => {
-  return keywords.some((keyword) => text.includes(keyword));
+  return keywords.some((keyword) => {
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(
+      `(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`,
+      'u',
+    ).test(text);
+  });
 };
 
 export const phaseForTier = (tier: RouterTier): RouterPhase => {
@@ -175,16 +181,9 @@ export const decideRouting = (
   const recentConversation = getRecentConversationText(context);
   const toolResultCount = countToolResults(context);
   const wordCount = countWords(prompt);
-  const multiLinePrompt = prompt.split('\n').length >= 4;
+  const multiLinePrompt = prompt.split('\n').length >= 12;
 
   const explicitHighHints = [
-    'best',
-    'deep',
-    'deeply',
-    'carefully',
-    'thoroughly',
-    'robust',
-    'comprehensive',
     'step by step',
     'think hard',
     'highest quality',
@@ -207,19 +206,11 @@ export const decideRouting = (
     'planning',
     'architecture',
     'architect',
-    'design',
     'tradeoff',
     'trade-off',
-    'research',
-    'investigate',
     'root cause',
-    'analyze',
-    'analysis',
     'migration',
     'strategy',
-    'compare',
-    'options',
-    'approach',
   ];
   const summaryKeywords = [
     'summarize',
@@ -339,7 +330,7 @@ export const decideRouting = (
         containsAny(prompt, planningKeywords) ||
         prompt.startsWith('why ') ||
         wordCount >= highThreshold ||
-        multiLinePrompt
+        (multiLinePrompt && wordCount >= highThreshold)
       ) {
         phase = 'planning';
         tier = 'high';
@@ -461,12 +452,19 @@ export const runNativeClassifier = async (
   currentPhase?: RouterPhase,
   phaseBias = 0.5,
   signal?: AbortSignal,
+  onFailure?: (reason: string) => void,
 ): Promise<ClassifierDecisionResult | undefined> => {
-  if (!modelRegistry.classify) return undefined;
+  if (!modelRegistry.classify) {
+    onFailure?.('Classifier API is unavailable');
+    return undefined;
+  }
 
   let classifierModel: ClassifierModel<ClassifierApi> | undefined;
   if (classifierModelRef === 'auto') {
-    if (!modelRegistry.getAvailableOfType) return undefined;
+    if (!modelRegistry.getAvailableOfType) {
+      onFailure?.('Classifier discovery is unavailable');
+      return undefined;
+    }
     const available = await modelRegistry.getAvailableOfType(
       'classifier',
       undefined,
@@ -474,12 +472,18 @@ export const runNativeClassifier = async (
     );
     classifierModel = available[0];
   } else {
-    if (!modelRegistry.findOfType) return undefined;
+    if (!modelRegistry.findOfType) {
+      onFailure?.('Classifier model lookup is unavailable');
+      return undefined;
+    }
     const { provider, modelId } = parseCanonicalModelRef(classifierModelRef);
     classifierModel = modelRegistry.findOfType('classifier', provider, modelId);
   }
 
-  if (!classifierModel) return undefined;
+  if (!classifierModel) {
+    onFailure?.('Classifier model was not found or is unavailable');
+    return undefined;
+  }
 
   const promptText = getLastUserText(context);
   const historyText = getRecentConversationText(context, 4);
@@ -530,10 +534,25 @@ export const runNativeClassifier = async (
     totalCost += result.usage?.cost?.total ?? 0;
   }
 
-  if (result.stopReason !== 'stop') return undefined;
+  if (result.stopReason !== 'stop') {
+    const message = result.errorMessage ?? '';
+    const detail =
+      /\b(401|403)\b|api.?key|authenticat|unauthori[sz]ed|credential/i.test(
+        message,
+      )
+        ? 'authentication error'
+        : /\b429\b|rate.?limit|quota/i.test(message)
+          ? 'rate or quota limit'
+          : result.stopReason;
+    onFailure?.(`Classifier request ended with ${detail}`);
+    return undefined;
+  }
 
   const answer = result.answers.tier;
-  if (!answer || answer.type !== 'choice') return undefined;
+  if (!answer || answer.type !== 'choice') {
+    onFailure?.('Classifier returned an invalid tier answer');
+    return undefined;
+  }
 
   let selectedTier: RouterTier | undefined = isRouterTier(answer.choice)
     ? answer.choice
@@ -553,7 +572,10 @@ export const runNativeClassifier = async (
     );
   }
 
-  if (!selectedTier) return undefined;
+  if (!selectedTier) {
+    onFailure?.('Classifier returned an unknown tier');
+    return undefined;
+  }
 
   const rawProb = answer.probabilities?.[selectedTier];
   const probSuffix =
@@ -580,6 +602,7 @@ export const runClassifier = async (
   thinking?: ThinkingLevel,
   phaseBias = 0.5,
   signal?: AbortSignal,
+  onFailure?: (reason: string) => void,
 ): Promise<ClassifierDecisionResult | undefined> => {
   try {
     // 1. Prefer Pi's native classifier models (Jev, Clef, GPT-6 Luna, llama.cpp decision/chat classifiers)
@@ -590,6 +613,7 @@ export const runClassifier = async (
       currentPhase,
       phaseBias,
       signal,
+      onFailure,
     );
     if (nativeResult) return nativeResult;
     if (classifierModelRef === 'auto') return undefined;
@@ -667,8 +691,13 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
         };
       }
     }
+    onFailure?.('Chat classifier returned an invalid tier answer');
   } catch (_error) {
-    // Ignore classifier errors and fall back to heuristics
+    onFailure?.(
+      signal?.aborted
+        ? 'Classifier request was aborted'
+        : 'Classifier request failed',
+    );
   }
   return undefined;
 };

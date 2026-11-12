@@ -19,6 +19,11 @@ import {
   getUnsupportedTiers,
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
+import { codexQuotaGuard } from './codex-quota';
+import {
+  isSubscriptionLimit,
+  SUBSCRIPTION_FALLBACK_ERROR,
+} from './subscription-errors';
 import { isRouterPersistedState, buildPersistedState } from './state';
 import {
   updateStatus,
@@ -55,6 +60,25 @@ const routerExtension = <
     lastExtensionContext: undefined as TCtx | undefined,
     lastConfigWarnings: [] as string[],
   };
+  pi.registerCommand('router-quota', {
+    description:
+      'Show the shared Codex quota cooldown; clear it with reset after an account change',
+    handler: async (args, ctx) => {
+      if (args.trim() === 'reset') codexQuotaGuard.clear();
+      else if (args.trim() && args.trim() !== 'status') {
+        ctx.ui.notify('Usage: /router-quota [status|reset]', 'warning');
+        return;
+      }
+      const until = codexQuotaGuard.deadline();
+      ctx.ui.notify(
+        until === undefined
+          ? 'Codex quota cooldown is inactive.'
+          : `Codex quota cooldown ends at ${new Date(until).toISOString()}.`,
+        'info',
+      );
+    },
+  });
+
   let lastPersistedSnapshot: string | undefined;
   let isInitialized = false;
   let isInternalModelSwitch = false;
@@ -411,7 +435,42 @@ const routerExtension = <
     actions.updateStatus(ctx);
   });
 
+  pi.on('message_end', (event, ctx) => {
+    const message = event.message;
+    if (
+      ctx.model?.provider !== 'router' ||
+      message.role !== 'assistant' ||
+      message.stopReason !== 'error' ||
+      !message.errorMessage
+    )
+      return;
+    if (!isSubscriptionLimit(message.provider, message.errorMessage)) return;
+    const until = codexQuotaGuard.observe(
+      message.provider,
+      message.errorMessage,
+    );
+    const decision = state.lastDecision;
+    if (!decision || decision.profile !== ctx.model.id) return;
+    const tier =
+      state.currentConfig.profiles[decision.profile]?.[decision.tier];
+    if (!tier) return;
+    const chain = [...new Set([tier.model, ...(tier.fallbacks ?? [])])];
+    const index = chain.indexOf(`${message.provider}/${message.model}`);
+    if (index < 0 || index >= chain.length - 1) return;
+    // Keep the original error in the session, but let native bounded retries reach the next target.
+    pi.appendEntry('router-subscription-limit', {
+      provider: message.provider,
+      model: message.model,
+      originalError: message.errorMessage,
+      until,
+    });
+    return {
+      message: { ...message, errorMessage: SUBSCRIPTION_FALLBACK_ERROR },
+    };
+  });
+
   pi.on('turn_end', async (event, ctx) => {
+    codexQuotaGuard.observeMessage((event as { message?: unknown })?.message);
     ensureInitializedFromContext(ctx);
     if (state.routerEnabled) {
       state.accumulatedCost += extractUncountedMessageCost(event);
