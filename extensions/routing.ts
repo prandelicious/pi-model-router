@@ -605,7 +605,7 @@ export const runClassifier = async (
   onFailure?: (reason: string) => void,
 ): Promise<ClassifierDecisionResult | undefined> => {
   try {
-    // 1. Prefer Pi's native classifier models (Jev, Clef, GPT-6 Luna, llama.cpp decision/chat classifiers)
+    // 1. Prefer Pi's native classifier models (Jev, Microsoft Decision, Clef, GPT-6 Luna, llama.cpp classifiers)
     const nativeResult = await runNativeClassifier(
       classifierModelRef,
       modelRegistry,
