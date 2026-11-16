@@ -34,6 +34,25 @@
       },
       "additionalProperties": false
     },
+    "qualityObserver": {
+      "type": "object",
+      "description": "Optional observe-only review of sampled low-tier final answers. Disabled by default. The request, answer, and tool evidence are sent to the selected classifier.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "sampleRate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.2
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Classifier model reference: auto or a canonical provider/model reference. Defaults to classifierModel, then auto."
+        }
+      },
+      "additionalProperties": false
+    },
     "classifierModel": {
       "description": "Classifier model used to categorize user intent. Accepts \"auto\" (uses first available Pi native classifier such as Jev, GitHub Copilot microsoft-decision-1, Clef, GPT-6 Luna, or llama.cpp classifier), a model alias from \"models\", a canonical \"provider/model\" reference, or an object with \"model\" and optional \"thinking\".",
       "oneOf": [

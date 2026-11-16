@@ -279,6 +279,7 @@ describe('config.ts', () => {
         phaseBias: 0.8,
         maxSessionBudget: 5.5,
         classifierModel: 'gpt4',
+        qualityObserver: { enabled: true, sampleRate: 0.4, model: 'jev' },
         rules: [
           { matches: 'test', tier: 'high', reason: 'Rule reason' },
           { matches: ['foo', 'bar'], tier: 'low' },
@@ -290,6 +291,7 @@ describe('config.ts', () => {
         },
         models: {
           gpt4: { model: 'openai/gpt-4o' },
+          jev: { model: 'typesafe/jev-latest' },
         },
       };
 
@@ -300,6 +302,11 @@ describe('config.ts', () => {
       expect(config.phaseBias).toBe(0.8);
       expect(config.maxSessionBudget).toBe(5.5);
       expect(config.classifierModel?.model).toBe('openai/gpt-4o');
+      expect(config.qualityObserver).toEqual({
+        enabled: true,
+        sampleRate: 0.4,
+        model: 'typesafe/jev-latest',
+      });
       expect(config.rules?.length).toBe(2);
       expect(config.profiles.balanced?.high?.model).toBe(
         'google/gemini-2.5-pro',

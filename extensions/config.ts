@@ -133,6 +133,10 @@ export const mergeConfig = (
     autoPinFirstTurnDecision:
       override.autoPinFirstTurnDecision ?? base.autoPinFirstTurnDecision,
     lowEscalation: override.lowEscalation ?? base.lowEscalation,
+    qualityObserver:
+      base.qualityObserver && override.qualityObserver
+        ? { ...base.qualityObserver, ...override.qualityObserver }
+        : (override.qualityObserver ?? base.qualityObserver),
     classifierModel: override.classifierModel ?? base.classifierModel,
     phaseBias: override.phaseBias ?? base.phaseBias,
     maxSessionBudget: override.maxSessionBudget ?? base.maxSessionBudget,
@@ -484,6 +488,53 @@ export const normalizeConfig = (
     }
   }
 
+  const qualityObserverRaw = isObjectRecord(raw.qualityObserver)
+    ? raw.qualityObserver
+    : undefined;
+  const rawObserverModel =
+    typeof qualityObserverRaw?.model === 'string'
+      ? qualityObserverRaw.model.trim()
+      : '';
+  let observerModel: string | undefined;
+  if (rawObserverModel === 'auto') {
+    observerModel = 'auto';
+  } else if (rawObserverModel) {
+    const resolved = resolveModelRef(
+      rawObserverModel,
+      hasModels ? normalizedModels : undefined,
+    );
+    try {
+      parseCanonicalModelRef(resolved.canonicalRef);
+      observerModel = resolved.canonicalRef;
+    } catch {
+      warnings.push(
+        'qualityObserver.model must be "auto", a model alias, or a provider/model reference. Ignored.',
+      );
+    }
+  }
+  const qualityObserver = qualityObserverRaw
+    ? {
+        enabled: qualityObserverRaw.enabled === true,
+        sampleRate:
+          typeof qualityObserverRaw.sampleRate === 'number' &&
+          qualityObserverRaw.sampleRate >= 0 &&
+          qualityObserverRaw.sampleRate <= 1
+            ? qualityObserverRaw.sampleRate
+            : 0.2,
+        model: observerModel,
+      }
+    : undefined;
+  if (
+    qualityObserverRaw?.sampleRate !== undefined &&
+    (typeof qualityObserverRaw.sampleRate !== 'number' ||
+      qualityObserverRaw.sampleRate < 0 ||
+      qualityObserverRaw.sampleRate > 1)
+  ) {
+    warnings.push(
+      'qualityObserver.sampleRate must be between 0 and 1. Using 0.2.',
+    );
+  }
+
   const escalationRaw = isObjectRecord(raw.lowEscalation)
     ? raw.lowEscalation
     : undefined;
@@ -512,6 +563,7 @@ export const normalizeConfig = (
     config: {
       debug: typeof raw.debug === 'boolean' ? raw.debug : false,
       lowEscalation,
+      qualityObserver,
       autoPinFirstTurnDecision:
         typeof raw.autoPinFirstTurnDecision === 'boolean'
           ? raw.autoPinFirstTurnDecision

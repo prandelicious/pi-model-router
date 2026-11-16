@@ -107,6 +107,8 @@ export interface RouterExtensionContext extends RouterUIContext {
     | undefined;
   sessionManager: {
     getBranch: () => readonly CustomSessionEntry[];
+    getSessionId?: () => string;
+    getLeafId?: () => string | null;
   };
   ui: RouterUIContext['ui'] & RouterCommandContext['ui'];
 }
@@ -187,6 +189,11 @@ export interface RouterExtensionAPI<
     handler: (event: RouterModelSelectEvent, ctx: TCtx) => Promise<void> | void,
   ): void;
   on(
+    event: 'input',
+    handler: (event: { text: string }, ctx: TCtx) => void,
+  ): void;
+  on(event: 'session_shutdown', handler: () => void): void;
+  on(
     event: 'thinking_level_select',
     handler: (
       event: RouterThinkingLevelSelectEvent,
@@ -234,6 +241,12 @@ export interface RouterProfile {
   low?: RoutedTierConfig;
 }
 
+export interface QualityObserverConfig {
+  enabled: boolean;
+  sampleRate?: number;
+  model?: string;
+}
+
 export interface LowEscalationConfig {
   enabledProfiles: string[];
   maxToolRounds: number;
@@ -243,6 +256,7 @@ export interface LowEscalationConfig {
 export interface RouterConfig {
   debug?: boolean;
   lowEscalation?: LowEscalationConfig;
+  qualityObserver?: QualityObserverConfig;
   autoPinFirstTurnDecision?: boolean;
   classifierModel?: ClassifierConfig;
   phaseBias?: number;

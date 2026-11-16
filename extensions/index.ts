@@ -1,6 +1,7 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import {
+  type ClassifierContext,
   type RouterConfig,
   type RouterExtensionAPI,
   type RouterExtensionContext,
@@ -19,6 +20,10 @@ import {
   getUnsupportedTiers,
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
+import {
+  createQualityObserver,
+  type QualityReviewInput,
+} from './quality-observer';
 import { codexQuotaGuard } from './codex-quota';
 import {
   isSubscriptionLimit,
@@ -36,6 +41,48 @@ import {
   markMessageCostCounted,
   extractUncountedMessageCost,
 } from './provider';
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const textFromContent = (value: unknown): string => {
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value)) return '';
+  return value
+    .flatMap((part) =>
+      isRecord(part) && part.type === 'text' && typeof part.text === 'string'
+        ? [part.text]
+        : [],
+    )
+    .join('\n');
+};
+
+const createQualityReviewInput = (
+  event: unknown,
+): QualityReviewInput | undefined => {
+  if (!isRecord(event) || !isRecord(event.message)) return undefined;
+  const message = event.message;
+  if (message.role !== 'assistant' || message.stopReason !== 'stop')
+    return undefined;
+  const context = isRecord(event.context) ? event.context : undefined;
+  const contextMessages = context?.contextMessages;
+  if (!Array.isArray(contextMessages)) return undefined;
+  const lastUser = [...contextMessages]
+    .reverse()
+    .find((entry) => isRecord(entry) && entry.role === 'user');
+  if (!isRecord(lastUser)) return undefined;
+  const request = textFromContent(lastUser.content);
+  const answer = textFromContent(message.content);
+  if (!request || !answer) return undefined;
+  const evidence = Array.isArray(event.toolResults)
+    ? event.toolResults.flatMap((result) => {
+        if (!isRecord(result)) return [];
+        const output = textFromContent(result.content);
+        return output ? [output] : [];
+      })
+    : [];
+  return { request, answer, evidence, truncated: false };
+};
 
 const routerExtension = <
   TCtx extends RouterExtensionContext = ExtensionContext,
@@ -83,6 +130,89 @@ const routerExtension = <
   let isInitialized = false;
   let isInternalModelSwitch = false;
   let internalThinkingChangeDepth = 0;
+  let lastObserverContext: TCtx | undefined;
+  const qualityObserver = createQualityObserver(
+    async (snapshot, signal) => {
+      const registry = state.currentModelRegistry;
+      if (!registry?.classify) throw new Error('Classifier API unavailable');
+      const observerConfig = state.currentConfig.qualityObserver;
+      const modelRef =
+        observerConfig?.model ??
+        state.currentConfig.classifierModel?.model ??
+        'auto';
+      const classifier =
+        modelRef === 'auto'
+          ? (
+              await registry.getAvailableOfType?.('classifier', undefined, {
+                signal,
+              })
+            )?.[0]
+          : (() => {
+              const separator = modelRef.indexOf('/');
+              if (separator < 1 || !registry.findOfType) return undefined;
+              return registry.findOfType(
+                'classifier',
+                modelRef.slice(0, separator),
+                modelRef.slice(separator + 1),
+              );
+            })();
+      if (!classifier) throw new Error('Observer classifier unavailable');
+      const classifierContext: ClassifierContext = {
+        state: {
+          request: snapshot.request,
+          answer: snapshot.answer,
+          evidence: snapshot.evidence,
+          truncated: snapshot.truncated,
+        },
+        questions: {
+          completionClaim: {
+            type: 'bool',
+            instructions:
+              'Does the answer claim that the requested work is complete? Judge only the answer text and request.',
+            criteria: {
+              true: 'The answer states or clearly implies that the requested work is complete.',
+              false:
+                'The answer does not claim that the requested work is complete.',
+            },
+          },
+          evidenceAssessment: {
+            type: 'choice',
+            instructions:
+              'How do the available evidence items relate to the answer completion claim? Treat missing evidence as unverified, not as failure.',
+            criteria: {
+              supported: 'The evidence supports the completion claim.',
+              contradicted: 'The evidence conflicts with the completion claim.',
+              'insufficient-evidence':
+                'The evidence does not verify or contradict the completion claim.',
+            },
+          },
+        },
+      };
+      const result = await registry.classify(classifier, classifierContext, {
+        signal,
+      });
+      if (result.stopReason !== 'stop')
+        throw new Error('Observer review failed');
+      return {
+        answers: result.answers,
+        reviewer: `${result.provider}/${result.model}`,
+      };
+    },
+    (record) => {
+      try {
+        const sessionManager = lastObserverContext?.sessionManager;
+        if (
+          !sessionManager ||
+          sessionManager.getSessionId?.() !== record.sessionId ||
+          sessionManager.getLeafId?.() !== record.branchId
+        )
+          return;
+        pi.appendEntry('router-quality-review', record);
+      } catch {
+        // A branch switch or session shutdown can invalidate late writes.
+      }
+    },
+  );
 
   const setModelInternally = async (
     model: NonNullable<ExtensionContext['model']>,
@@ -517,6 +647,30 @@ const routerExtension = <
   pi.on('turn_end', async (event, ctx) => {
     codexQuotaGuard.observeMessage((event as { message?: unknown })?.message);
     ensureInitializedFromContext(ctx);
+    lastObserverContext = ctx;
+    if (
+      state.currentConfig.qualityObserver?.enabled &&
+      state.lastDecision?.tier === 'low' &&
+      Math.random() < (state.currentConfig.qualityObserver.sampleRate ?? 0.2)
+    ) {
+      const snapshot = createQualityReviewInput(event);
+      const sessionId = ctx.sessionManager.getSessionId?.();
+      const branchId = ctx.sessionManager.getLeafId?.();
+      const messageEntryId = isRecord(event) ? event.messageEntryId : undefined;
+      if (
+        snapshot &&
+        sessionId &&
+        branchId &&
+        typeof messageEntryId === 'string'
+      ) {
+        void qualityObserver.observe(snapshot, {
+          reviewId: `${sessionId}:${messageEntryId}`,
+          sessionId,
+          branchId,
+          turnId: messageEntryId,
+        });
+      }
+    }
     if (state.routerEnabled) {
       state.accumulatedCost += extractUncountedMessageCost(event);
     } else {
@@ -525,6 +679,9 @@ const routerExtension = <
     persistState();
     actions.updateStatus(ctx);
   });
+
+  pi.on('input', () => qualityObserver.cancel());
+  pi.on('session_shutdown', () => qualityObserver.cancel());
 
   pi.on('thinking_level_select', (event, ctx) => {
     ensureInitializedFromContext(ctx);

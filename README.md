@@ -71,11 +71,28 @@ Copy the example config to one of:
 | `$schema`                  | (Optional) JSON Schema URL for editor autocompletion and validation.                                                                                                                                                                                                                                                                                       |
 | `autoPinFirstTurnDecision` | (Optional) Automatically pin the active profile to the tier selected on the first turn of a conversation (`default: false`). Run `/router pin auto` at any time to unpin and return to dynamic per-turn routing.                                                                                                                                           |
 | `classifierModel`          | (Optional) Model used to categorize intent. Supports `"auto"` (uses first available Pi native classifier such as Jev, GitHub Copilot `microsoft-decision-1`, Clef, GPT-6 Luna, or `llama.cpp`), a native classifier ID (e.g. `"typesafe/jev-latest"` or `"github-copilot/microsoft-decision-1"`), a chat LLM, or a model alias. Omit for local heuristics. |
+| `qualityObserver`          | (Optional) Observe-only review of sampled low-tier final answers. Set `enabled` to `true` to send the request, answer, and tool evidence to a classifier. Review metadata is stored in the Pi session; snapshot text is not stored. Defaults to 20% sampling. Its model defaults to `classifierModel`, or `auto` when no classifier is configured.         |
 | `maxSessionBudget`         | (Optional) USD budget for the session. Forces `medium` tier once exceeded.                                                                                                                                                                                                                                                                                 |
 | `phaseBias`                | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`.                                                                                                                                                                                                                                                                          |
 | `rules`                    | List of custom keyword rules (e.g. `{ "matches": "deploy", "tier": "high" }`).                                                                                                                                                                                                                                                                             |
 | `models`                   | (Optional) Map of model aliases to definitions with `model`, `contextWindow`, `maxTokens`.                                                                                                                                                                                                                                                                 |
 | `profiles`                 | Map of profile definitions, each containing optional `high`, `medium`, and `low` tiers (at least one required). Tier models can reference aliases from `models`.                                                                                                                                                                                           |
+
+### Quality observer
+
+The observer does not change routing or completed answers. It stores only the assessment, model name, timing, truncation flag, and session identifiers. It skips persistence if the session or branch changes before review completion.
+
+```json
+{
+  "qualityObserver": {
+    "enabled": true,
+    "sampleRate": 0.2,
+    "model": "typesafe/jev-latest"
+  }
+}
+```
+
+Treat this feature as a pilot. Review snapshots can contain sensitive text, so enable it only when you accept sending that text to the selected classifier.
 
 ### Low-tier escalation
 
