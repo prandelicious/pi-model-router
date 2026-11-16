@@ -57,8 +57,9 @@ const textFromContent = (value: unknown): string => {
     .join('\n');
 };
 
-const createQualityReviewInput = (
+export const createQualityReviewInput = (
   event: unknown,
+  branch: unknown,
 ): QualityReviewInput | undefined => {
   if (!isRecord(event) || !isRecord(event.message)) return undefined;
   const message = event.message;
@@ -74,13 +75,41 @@ const createQualityReviewInput = (
   const request = textFromContent(lastUser.content);
   const answer = textFromContent(message.content);
   if (!request || !answer) return undefined;
-  const evidence = Array.isArray(event.toolResults)
+  const currentTurnEvidence = Array.isArray(event.toolResults)
     ? event.toolResults.flatMap((result) => {
         if (!isRecord(result)) return [];
         const output = textFromContent(result.content);
         return output ? [output] : [];
       })
     : [];
+  const branchEntries = Array.isArray(branch) ? branch : [];
+  let lastUserIndex = -1;
+  for (let index = branchEntries.length - 1; index >= 0; index--) {
+    const entry = branchEntries[index];
+    if (
+      isRecord(entry) &&
+      entry.type === 'message' &&
+      isRecord(entry.message) &&
+      entry.message.role === 'user'
+    ) {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  const branchEvidence: string[] = [];
+  for (let index = branchEntries.length - 1; index > lastUserIndex; index--) {
+    const entry = branchEntries[index];
+    if (
+      !isRecord(entry) ||
+      entry.type !== 'message' ||
+      !isRecord(entry.message) ||
+      entry.message.role !== 'toolResult'
+    )
+      continue;
+    const output = textFromContent(entry.message.content);
+    if (output) branchEvidence.push(output);
+  }
+  const evidence = [...new Set([...currentTurnEvidence, ...branchEvidence])];
   return { request, answer, evidence, truncated: false };
 };
 
@@ -168,17 +197,17 @@ const routerExtension = <
           completionClaim: {
             type: 'bool',
             instructions:
-              'Does the answer claim that the requested work is complete? Judge only the answer text and request.',
+              'Does the answer make a concrete claim that requested work has been completed? Judge only the answer text and request. A question, plan, opinion, review verdict, or description of intent is not a completion claim.',
             criteria: {
-              true: 'The answer states or clearly implies that the requested work is complete.',
+              true: 'The answer claims a concrete result such as applied, fixed, implemented, created, updated, installed, added, removed, or merged, or reports test runs that pass.',
               false:
-                'The answer does not claim that the requested work is complete.',
+                'The answer is a question, plan, opinion, review verdict, description of intent, or otherwise does not claim a concrete completed result.',
             },
           },
           evidenceAssessment: {
             type: 'choice',
             instructions:
-              'How do the available evidence items relate to the answer completion claim? Treat missing evidence as unverified, not as failure.',
+              'Does available evidence support, contradict, or provide insufficient evidence for the answer completion claim? Treat missing evidence as unverified, not as failure.',
             criteria: {
               supported: 'The evidence supports the completion claim.',
               contradicted: 'The evidence conflicts with the completion claim.',
@@ -653,7 +682,10 @@ const routerExtension = <
       state.lastDecision?.tier === 'low' &&
       Math.random() < (state.currentConfig.qualityObserver.sampleRate ?? 0.2)
     ) {
-      const snapshot = createQualityReviewInput(event);
+      const snapshot = createQualityReviewInput(
+        event,
+        ctx.sessionManager.getBranch?.(),
+      );
       const sessionId = ctx.sessionManager.getSessionId?.();
       const branchId = ctx.sessionManager.getLeafId?.();
       const messageEntryId = isRecord(event) ? event.messageEntryId : undefined;
@@ -663,12 +695,24 @@ const routerExtension = <
         branchId &&
         typeof messageEntryId === 'string'
       ) {
-        void qualityObserver.observe(snapshot, {
-          reviewId: `${sessionId}:${messageEntryId}`,
-          sessionId,
-          branchId,
-          turnId: messageEntryId,
-        });
+        void qualityObserver
+          .observe(snapshot, {
+            reviewId: `${sessionId}:${messageEntryId}`,
+            sessionId,
+            branchId,
+            turnId: messageEntryId,
+          })
+          .then((outcome) => {
+            if (outcome.status === 'skipped' && state.debugEnabled) {
+              ctx.ui.notify(
+                `[router] Quality review skipped: ${outcome.reason}.`,
+                'info',
+              );
+            }
+          })
+          .catch(() => {
+            // A branch switch or session shutdown can invalidate late writes.
+          });
       }
     }
     if (state.routerEnabled) {

@@ -4,12 +4,25 @@ export const QUALITY_OBSERVER_ENTRY = 'router-quality-review';
 export const QUALITY_OBSERVER_TIMEOUT_MS = 3_000;
 export const QUALITY_OBSERVER_MAX_INPUT_CHARS = 1_000;
 
+export const QUALITY_BUDGET = {
+  answer: 600,
+  evidence: 300,
+  request: 100,
+} as const;
+
 export type QualityAssessment =
   | 'no-completion-claim'
+  | 'no-evidence'
   | 'supported'
   | 'contradicted'
   | 'insufficient-evidence'
   | 'unknown';
+
+export interface QualityTruncation {
+  request: boolean;
+  answer: boolean;
+  evidence: boolean;
+}
 
 export interface QualityReviewRecord {
   version: 1;
@@ -23,6 +36,7 @@ export interface QualityReviewRecord {
   reviewer: string;
   durationMs: number;
   snapshotTruncated: boolean;
+  truncation?: QualityTruncation;
   timestamp: number;
 }
 
@@ -33,6 +47,10 @@ export interface QualityReviewInput {
   truncated: boolean;
 }
 
+export interface BoundedQualityReviewInput extends QualityReviewInput {
+  truncation: QualityTruncation;
+}
+
 export interface QualityObserverOptions {
   timeoutMs?: number;
   failureLimit?: number;
@@ -41,54 +59,74 @@ export interface QualityObserverOptions {
 }
 
 export type QualityReview = (
-  input: QualityReviewInput,
+  input: BoundedQualityReviewInput,
   signal: AbortSignal,
 ) => Promise<{
   answers: Record<string, ClassifierAnswer>;
   reviewer: string;
 }>;
 
+export type QualityObserveOutcome =
+  | { status: 'recorded'; record: QualityReviewRecord }
+  | { status: 'skipped'; reason: 'busy' | 'circuit-open' }
+  | { status: 'cancelled' };
+
 export const boundQualityReviewInput = (
   input: QualityReviewInput,
   maxChars = QUALITY_OBSERVER_MAX_INPUT_CHARS,
-): QualityReviewInput => {
-  const normalized = {
-    request: input.request,
-    answer: input.answer,
-    evidence: input.evidence,
-    truncated: input.truncated,
+): BoundedQualityReviewInput => {
+  const totalBudget = Math.max(0, maxChars);
+  const scale = totalBudget / QUALITY_OBSERVER_MAX_INPUT_CHARS;
+  const budgets = {
+    answer: Math.floor(QUALITY_BUDGET.answer * scale),
+    evidence: Math.floor(QUALITY_BUDGET.evidence * scale),
+    request: Math.floor(QUALITY_BUDGET.request * scale),
   };
-  let remaining = maxChars;
-  const take = (value: string): string => {
-    const result = value.slice(0, remaining);
-    remaining -= result.length;
-    return result;
-  };
-  const request = take(normalized.request);
-  const answer = take(normalized.answer);
-  const evidence: string[] = [];
-  for (const item of normalized.evidence) {
+  let remaining =
+    totalBudget - budgets.answer - budgets.evidence - budgets.request;
+  for (const field of ['answer', 'evidence', 'request'] as const) {
     if (remaining <= 0) break;
-    evidence.push(take(item));
+    budgets[field] += 1;
+    remaining -= 1;
   }
+
+  const answer = input.answer.slice(0, budgets.answer);
+  let evidenceRemaining = budgets.evidence;
+  const evidence = input.evidence.map((item) => {
+    const boundedItem = item.slice(0, evidenceRemaining);
+    evidenceRemaining -= boundedItem.length;
+    return boundedItem;
+  });
+  const request = input.request.slice(0, budgets.request);
+  const truncation: QualityTruncation = {
+    request: request.length !== input.request.length,
+    answer: answer.length !== input.answer.length,
+    evidence: evidence.some(
+      (item, index) => item.length !== input.evidence[index]?.length,
+    ),
+  };
   return {
     request,
     answer,
     evidence,
     truncated:
-      normalized.truncated ||
-      request.length !== normalized.request.length ||
-      answer.length !== normalized.answer.length ||
-      evidence.join('').length !== normalized.evidence.join('').length,
+      input.truncated ||
+      truncation.request ||
+      truncation.answer ||
+      truncation.evidence,
+    truncation,
   };
 };
 
 export const parseQualityAssessment = (
   claim: ClassifierAnswer | undefined,
   evidence: ClassifierAnswer | undefined,
+  hasEvidence: boolean,
 ): QualityAssessment => {
-  if (claim?.type !== 'bool' || evidence?.type !== 'choice') return 'unknown';
+  if (claim?.type !== 'bool') return 'unknown';
   if (claim.probability < 0.5) return 'no-completion-claim';
+  if (!hasEvidence) return 'no-evidence';
+  if (evidence?.type !== 'choice') return 'unknown';
   switch (evidence.choice) {
     case 'supported':
       return 'supported';
@@ -136,15 +174,19 @@ export const createQualityObserver = (
       | 'reviewer'
       | 'durationMs'
       | 'snapshotTruncated'
+      | 'truncation'
       | 'timestamp'
     >,
-  ): Promise<void> => {
-    if (active || now() < disabledUntil) return;
+  ): Promise<QualityObserveOutcome> => {
+    if (active) return { status: 'skipped', reason: 'busy' };
+    if (now() < disabledUntil) {
+      return { status: 'skipped', reason: 'circuit-open' };
+    }
     const boundedInput = boundQualityReviewInput(input);
     const cacheKey = JSON.stringify(boundedInput);
     const cached = cache.get(cacheKey);
     if (cached) {
-      persist({
+      const record: QualityReviewRecord = {
         version: 1,
         status: 'reviewed',
         ...source,
@@ -152,9 +194,11 @@ export const createQualityObserver = (
         reviewer: cached.reviewer,
         durationMs: 0,
         snapshotTruncated: boundedInput.truncated,
+        truncation: boundedInput.truncation,
         timestamp: now(),
-      });
-      return;
+      };
+      persist(record);
+      return { status: 'recorded', record };
     }
     active = true;
     const taskGeneration = generation;
@@ -174,31 +218,35 @@ export const createQualityObserver = (
         review(boundedInput, taskController.signal),
         timeout,
       ]);
-      if (taskGeneration !== generation) return;
+      if (taskGeneration !== generation) return { status: 'cancelled' };
       failures = 0;
       const assessment = parseQualityAssessment(
         result.answers.completionClaim,
         result.answers.evidenceAssessment,
+        boundedInput.evidence.length > 0,
       );
       cache.set(cacheKey, { assessment, reviewer: result.reviewer });
       if (cache.size > 256) {
         const oldestKey = cache.keys().next().value;
         if (oldestKey !== undefined) cache.delete(oldestKey);
       }
-      persist({
+      const record: QualityReviewRecord = {
         version: 1,
         status: 'reviewed',
         ...source,
         assessment,
         reviewer: result.reviewer,
         durationMs: Math.max(0, now() - startedAt),
-        snapshotTruncated: input.truncated,
+        snapshotTruncated: boundedInput.truncated,
+        truncation: boundedInput.truncation,
         timestamp: now(),
-      });
+      };
+      persist(record);
+      return { status: 'recorded', record };
     } catch {
-      if (taskGeneration !== generation) return;
+      if (taskGeneration !== generation) return { status: 'cancelled' };
       failures += 1;
-      persist({
+      const record: QualityReviewRecord = {
         version: 1,
         status: 'failed',
         failureReason: taskController.signal.aborted
@@ -208,13 +256,16 @@ export const createQualityObserver = (
         assessment: 'unknown',
         reviewer: 'unknown',
         durationMs: Math.max(0, now() - startedAt),
-        snapshotTruncated: input.truncated,
+        snapshotTruncated: boundedInput.truncated,
+        truncation: boundedInput.truncation,
         timestamp: now(),
-      });
+      };
+      persist(record);
       if (failures >= failureLimit) {
         disabledUntil = now() + cooldownMs;
         failures = 0;
       }
+      return { status: 'recorded', record };
     } finally {
       if (timeoutId !== undefined) clearTimeout(timeoutId);
       if (controller === taskController) controller = undefined;

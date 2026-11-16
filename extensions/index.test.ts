@@ -8,7 +8,7 @@ import type {
   RouterModelSelectEvent,
   RouterThinkingLevelSelectEvent,
 } from './types';
-import routerExtension from './index';
+import routerExtension, { createQualityReviewInput } from './index';
 
 const _extensionFactoryTypeCheck: ExtensionFactory = routerExtension;
 void _extensionFactoryTypeCheck;
@@ -130,6 +130,63 @@ const createMockPi = (eventListeners: Record<string, TriggerHandler[]>) => ({
       ),
     );
   }),
+});
+
+describe('createQualityReviewInput', () => {
+  const event = {
+    message: { role: 'assistant', stopReason: 'stop', content: 'Completed.' },
+    context: { contextMessages: [{ role: 'user', content: 'Do the work.' }] },
+  };
+
+  it('collects branch tool results after the last user message, newest first', () => {
+    const input = createQualityReviewInput(event, [
+      { type: 'message', message: { role: 'user', content: 'Old request' } },
+      {
+        type: 'message',
+        message: { role: 'toolResult', content: 'Old evidence' },
+      },
+      { type: 'message', message: { role: 'user', content: 'Do the work.' } },
+      {
+        type: 'message',
+        message: { role: 'toolResult', content: 'First evidence' },
+      },
+      {
+        type: 'message',
+        message: { role: 'toolResult', content: 'Newest evidence' },
+      },
+    ]);
+
+    expect(input?.evidence).toEqual(['Newest evidence', 'First evidence']);
+  });
+
+  it('orders current turn tool results before branch results and deduplicates exact text', () => {
+    const input = createQualityReviewInput(
+      {
+        ...event,
+        toolResults: [
+          { content: 'Current evidence' },
+          { content: 'Shared evidence' },
+        ],
+      },
+      [
+        { type: 'message', message: { role: 'user', content: 'Do the work.' } },
+        {
+          type: 'message',
+          message: { role: 'toolResult', content: 'Shared evidence' },
+        },
+        {
+          type: 'message',
+          message: { role: 'toolResult', content: 'Branch evidence' },
+        },
+      ],
+    );
+
+    expect(input?.evidence).toEqual([
+      'Current evidence',
+      'Shared evidence',
+      'Branch evidence',
+    ]);
+  });
 });
 
 describe('index.ts (orchestrator)', () => {
